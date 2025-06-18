@@ -57,6 +57,17 @@ class GroupChatRequestPublish(BaseModel):
 
     ...
 
+class GraphFlowGroupChatAgentResponse(GroupChatAgentResponse):
+    """A request to publish a message to a group chat."""
+
+    ...
+
+
+class GraphFlowGroupChatRequestPublish(BaseModel):
+    """A request to publish a message to a graph flow group chat."""
+
+    scc: List[str]
+
 
 class GroupChatMessage(BaseModel):
     """A message from a group chat."""

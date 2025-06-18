@@ -18,7 +18,7 @@ from autogen_agentchat.messages import (
     TextMessage,
 )
 from autogen_agentchat.state import BaseGroupChatManagerState
-from autogen_agentchat.teams import BaseGroupChat
+from autogen_agentchat.teams import BaseGroupChat, GraphFlowGroupChatRequestPublish, GraphFlowGroupChatAgentResponse
 
 from ..._group_chat._base_group_chat_manager import BaseGroupChatManager
 from ..._group_chat._events import GroupChatTermination
@@ -207,6 +207,200 @@ class DiGraph(BaseModel):
 
         self._has_cycles = self.has_cycles_with_exit()
 
+class DiGraphSCC(DiGraph):
+    """Represents Strongly Connected Components in a directed graph
+    
+    Uses Tarjan's algorithm to find all strongly connected components and assigns unique identifiers to each SCC.
+    Supports dependency management between SCCs and execution order calculation.
+    """
+    default_start_scc: List[str] | None = None
+    
+    class _TarjanDataStruct:
+        """Data structure used by Tarjan's algorithm"""
+        def __init__(self):
+            self.time: int = 0
+            self.disc: Dict[str, int] = {}  # Node discovery time
+            self.low: Dict[str, int] = {}   # Minimum discovery time reachable by node
+            self.on_stack: Set[str] = set() # Nodes currently on stack
+            self.stack: List[str] = []      # DFS stack
+            self.sccs: List[List[str]] = [] # Store found SCCs
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Use Tarjan's algorithm to find all SCCs
+        self._sccs = self.find_sccs_tarjan()
+        # Create unique identifiers for each SCC
+        self._scc_counter = 0
+        self._scc_nodes = {}  # scc_id -> nodes
+        self._scc_adj = {}    # scc_id -> [neighbor_scc_ids]
+        self._scc_edges = {}  # scc_id -> [source_node -> list[edges]]
+        self._scc_in_degree = {}  # scc_id -> in_degree
+        self._scc_nodes_in_degree = {}  # scc_id -> [node -> in_degree]
+        self._scc_nodes_activation = {}  # scc_id -> [node -> activation]
+        
+        # Initialize SCC data
+        for scc in self._sccs:
+            scc_id = f"scc_{self._scc_counter}"
+            self._scc_counter += 1
+            self._scc_nodes[scc_id] = scc
+            self._scc_adj[scc_id] = []
+            self._scc_edges[scc_id] = {}
+            self._scc_in_degree[scc_id] = 0
+            self._scc_nodes_in_degree[scc_id] = {}
+            self._scc_nodes_activation[scc_id] = {}
+        # Calculate dependencies between SCCs
+        self._compute_scc_dependencies()
+        # Calculate edges within each SCC
+        self._compute_scc_edges()
+
+    def _compute_scc_dependencies(self) -> None:
+        """Calculate dependencies between SCCs"""
+        # Create mapping from nodes to SCCs
+        node_to_scc = {}
+        for scc_id, nodes in self._scc_nodes.items():
+            for node in nodes:
+                node_to_scc[node] = scc_id
+
+        # Calculate edges and in-degrees between SCCs
+        for u, node in self.nodes.items():
+            for edge in node.edges:
+                v = edge.target
+                scc_u = node_to_scc[u]
+                scc_v = node_to_scc[v]
+                
+                # If edge connects two different SCCs, add dependency
+                if scc_u != scc_v:
+                    self._scc_adj[scc_u].append(scc_v)
+                    self._scc_in_degree[scc_v] += 1
+                    #compute edge
+                    self._scc_edges[scc_u][u].append(edge)
+
+    def _compute_scc_edges(self) -> None:
+        """Calculate edges within each SCC"""
+        for scc_id, nodes in self._scc_nodes.items():
+            scc_nodes = set(nodes)
+            internal_edges = []
+            
+            for u in nodes:
+                for edge in self.nodes[u].edges:
+                    if edge.target in scc_nodes:
+                        internal_edges.append(edge)
+                    if edge.target not in self._scc_nodes_in_degree[scc_id]:
+                        self._scc_nodes_in_degree[scc_id][edge.target] = 0
+                    self._scc_nodes_in_degree[scc_id][edge.target] += 1
+                    self._scc_nodes_activation[scc_id][edge.target] = "all"
+                self._scc_edges[scc_id][u] = internal_edges
+
+    def get_scc_nodes_in_degree(self, scc_id: str) -> Dict[str, int]:
+        return self._scc_nodes_in_degree[scc_id]
+
+    def get_scc_nodes_activation(self, scc_id: str, node: str) -> Literal["any", "all"]:
+        return self._scc_nodes_activation[scc_id][node]
+
+    def _tarjan_dfs(self, u: str, tarjan_data: _TarjanDataStruct) -> None:
+        """DFS implementation of Tarjan's algorithm"""
+        tarjan_data.disc[u] = tarjan_data.low[u] = tarjan_data.time
+        tarjan_data.time += 1
+        tarjan_data.stack.append(u)
+        tarjan_data.on_stack.add(u)
+        
+        adjs = self.nodes.get(u)
+        if adjs:
+            for edge in adjs.edges:
+                v = edge.target
+                if v not in tarjan_data.disc:
+                    self._tarjan_dfs(v, tarjan_data)
+                    tarjan_data.low[u] = min(tarjan_data.low[u], tarjan_data.low[v])
+                elif v in tarjan_data.on_stack:
+                    tarjan_data.low[u] = min(tarjan_data.low[u], tarjan_data.disc[v])
+
+        if tarjan_data.low[u] == tarjan_data.disc[u]:
+            scc = []
+            while True:
+                node = tarjan_data.stack.pop()
+                tarjan_data.on_stack.remove(node)
+                scc.append(node)
+                if node == u:
+                    break
+            # Sort within scc for stable output order
+            tarjan_data.sccs.append(tuple(reversed(scc)))
+
+    def find_sccs_tarjan(self) -> List[List[str]]:
+        """Use Tarjan's algorithm to find all strongly connected components"""
+        tarjan_data = self._TarjanDataStruct()
+        
+        # Sort nodes to ensure algorithm stability
+        for node in sorted(self.nodes.keys()):
+            if node not in tarjan_data.disc:
+                self._tarjan_dfs(node, tarjan_data)
+                
+        return tarjan_data.sccs
+    def get_scc_by_node(self, node: str) -> str:
+        """Get the SCC that contains the specified node"""
+        for scc_id, nodes in self._scc_nodes.items():
+            if node in nodes:
+                return scc_id
+        raise ValueError(f"Node {node} not found in any SCC")
+
+    def get_scc_edges(self, scc_id: str, source_node: str) -> List[DiGraphEdge]:
+        """Get edges within the specified SCC
+        
+        Args:
+            scc_id: Unique identifier of the SCC
+            
+        Returns:
+            List of edges within the SCC
+        """
+        return self._scc_edges[scc_id][source_node]
+
+    def get_scc_nodes(self, scc_id: str) -> List[str]:
+        """Get the list of nodes in the specified SCC
+        
+        Args:
+            scc_id: Unique identifier of the SCC
+            
+        Returns:
+            List of nodes contained in the SCC
+        """
+        return self._scc_nodes[scc_id]
+    
+    def get_activation(self, node_name: str) -> Literal["any", "all"]:
+        """Get the activation method of the SCC"""
+        return self.nodes[node_name].activation
+
+    def get_scc_adj(self) -> Dict[str, List[str]]:
+        """Get adjacency relationships between SCCs"""
+        return self._scc_adj
+
+    def get_start_nodes(self) -> List[str]:
+        """Get nodes with in-degree 0 as starting points"""
+        starts_nodes = []
+        for nodes_in_degree in self._scc_nodes_in_degree.values():
+            for node, in_degree in nodes_in_degree.items():
+                if in_degree == 0:
+                    starts_nodes.append(node)
+        if not starts_nodes:
+            return [self.default_start_scc] if self.default_start_scc else []
+        else:
+            return starts_nodes
+
+    def get_execute_order(self) -> List[str]:
+        """Get the execution order of SCCs (topological sort)"""
+        # Copy in-degree information to avoid modifying original data
+        in_degree = {scc_id: degree for scc_id, degree in self._scc_in_degree.items()}
+        queue = deque([scc_id for scc_id, degree in in_degree.items() if degree == 0])
+        scc_exec_order = []
+        
+        while queue:
+            scc_id = queue.popleft()
+            scc_exec_order.append(scc_id)
+            
+            for neighbor_scc in self._scc_adj[scc_id]:
+                in_degree[neighbor_scc] -= 1
+                if in_degree[neighbor_scc] == 0:
+                    queue.append(neighbor_scc)
+                    
+        return scc_exec_order
 
 class GraphFlowManagerState(BaseGroupChatManagerState):
     """Tracks active execution state for DAG-based execution."""
@@ -230,7 +424,7 @@ class GraphFlowManager(BaseGroupChatManager):
         termination_condition: TerminationCondition | None,
         max_turns: int | None,
         message_factory: MessageFactory,
-        graph: DiGraph,
+        graph: DiGraphSCC,
     ) -> None:
         """Initialize the graph-based execution manager."""
         super().__init__(
@@ -250,20 +444,45 @@ class GraphFlowManager(BaseGroupChatManager):
             raise ValueError("A termination condition is required for cyclic graphs without a maximum turn limit.")
         self._graph = graph
         # Lookup table for incoming edges for each node.
-        self._parents = graph.get_parents()
+        #self._parents = graph.get_parents()
+        
+        self._scc_parent : Dict[str, List[str]] = graph.get_scc_parent()
+        self._current_scc : List[str]  = []
         # Lookup table for outgoing edges for each node.
-        self._edges: Dict[str, List[DiGraphEdge]] = {n: node.edges for n, node in graph.nodes.items()}
+        #self._edges: Dict[str, List[DiGraphEdge]] = {n: node.edges for n, node in graph.nodes.items()}
         # Activation lookup table for each node.
-        self._activation: Dict[str, Literal["any", "all"]] = {n: node.activation for n, node in graph.nodes.items()}
+        scc_ids : List[str] = graph.get_scc_adj().keys()
+        self._activation: Dict[str, Dict[str, Literal["any", "all"]]] = {
+            scc_id: {
+                node: graph.get_scc_nodes_activation(scc_id, node) for node in graph.get_scc_nodes_in_degree(scc_id).keys()
+            } for scc_id in scc_ids
+        }
 
         # === Mutable states for the graph execution ===
         # Count the number of remaining parents to activate each node.
-        self._remaining: Counter[str] = Counter({n: len(p) for n, p in self._parents.items()})
+        self._remaining: Dict[str,Dict[str,Counter[str]]] = {
+            scc_id: {
+                node: self._graph.get_scc_nodes_in_degree(scc_id)[node] for node in graph.get_scc_nodes(scc_id)
+            } 
+            for scc_id in scc_ids
+        }
         # Lookup table for nodes that have been enqueued through an any activation.
         # This is used to prevent re-adding the same node multiple times.
-        self._enqueued_any: Dict[str, bool] = {n: False for n in graph.nodes}
+        self._enqueued_any: Dict[str, Dict[str, bool]] = {
+            scc_id: {node: False for node in graph.get_scc_nodes_in_degree(scc_id).keys()} for scc_id in scc_ids
+        }
         # Ready queue for nodes that are ready to execute, starting with the start nodes.
-        self._ready: Deque[str] = deque([n for n in graph.get_start_nodes()])
+        self._ready: Deque[str] = deque(graph.get_start_nodes())
+
+    def pair_request_with_response(self, message: GraphFlowGroupChatRequestPublish, response: Response, agent_name: str) -> GraphFlowGroupChatAgentResponse:
+        """Pair a request with a response."""
+        response : GraphFlowGroupChatAgentResponse = GraphFlowGroupChatAgentResponse(agent_response=response, agent_name=agent_name)
+        response.agent_response.chat_message.metadata["scc"] = self._current_scc
+        return response
+    
+    def fetch_group_chat_request_publish(self) -> GraphFlowGroupChatRequestPublish:
+        """Fetch the group chat request publish from the message."""
+        return GraphFlowGroupChatRequestPublish(scc=self._current_scc)
 
     async def update_message_thread(self, messages: Sequence[BaseAgentEvent | BaseChatMessage]) -> None:
         await super().update_message_thread(messages)
@@ -274,35 +493,42 @@ class GraphFlowManager(BaseGroupChatManager):
             # Ignore messages from sources outside of the graph.
             return
         assert isinstance(message, BaseChatMessage)
-        source = message.source
+        source_scc_id :str = message.metadata["scc"]
+        source_node = message.source
 
         # Propagate the update to the children of the node.
-        for edge in self._edges[source]:
+        for edge in self._graph.get_scc_edges(source_scc_id, source_node):
             # Use the new check_condition method that handles both string and callable conditions
             if not edge.check_condition(message):
                 continue
+            target_scc_id = self._graph.get_scc_by_node(edge.target)
             if self._activation[edge.target] == "all":
-                self._remaining[edge.target] -= 1
-                if self._remaining[edge.target] == 0:
+                self._remaining[target_scc_id][source_node][edge.target] -= 1
+                if self._remaining[target_scc_id][source_node][edge.target] == 0:
                     # If all parents are done, add to the ready queue.
                     self._ready.append(edge.target)
+                    self._current_scc = target_scc_id
             else:
                 # If activation is any, add to the ready queue if not already enqueued.
-                if not self._enqueued_any[edge.target]:
+                if not self._enqueued_any[target_scc_id][edge.target]:
                     self._ready.append(edge.target)
-                    self._enqueued_any[edge.target] = True
+                    self._enqueued_any[target_scc_id][edge.target] = True
+                    self._current_scc = target_scc_id
+            
 
     async def select_speaker(self, thread: Sequence[BaseAgentEvent | BaseChatMessage]) -> List[str]:
         # Drain the ready queue for the next set of speakers.
+        #switch current_scc
         speakers: List[str] = []
         while self._ready:
             speaker = self._ready.popleft()
             speakers.append(speaker)
             # Reset the bookkeeping for the node that were selected.
-            if self._activation[speaker] == "any":
-                self._enqueued_any[speaker] = False
+            scc_id = self._current_scc
+            if self._activation[scc_id][speaker] == "any":
+                self._enqueued_any[scc_id][speaker] = False
             else:
-                self._remaining[speaker] = len(self._parents[speaker])
+                self._remaining[scc_id][speaker] = self._graph.get_scc_nodes_in_degree(scc_id)[speaker]
 
         # If there are no speakers, trigger the stop agent.
         if not speakers:

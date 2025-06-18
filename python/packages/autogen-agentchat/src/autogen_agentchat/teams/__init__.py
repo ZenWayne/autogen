@@ -4,6 +4,10 @@ Each team inherits from the BaseGroupChat class.
 """
 
 from ._group_chat._base_group_chat import BaseGroupChat
+from ._group_chat._events import (
+    GraphFlowGroupChatRequestPublish,
+    GraphFlowGroupChatAgentResponse,
+)
 from ._group_chat._graph import (
     DiGraph,
     DiGraphBuilder,
@@ -18,6 +22,8 @@ from ._group_chat._swarm_group_chat import Swarm
 
 __all__ = [
     "BaseGroupChat",
+    "GraphFlowGroupChatRequestPublish",
+    "GraphFlowGroupChatAgentResponse",
     "RoundRobinGroupChat",
     "SelectorGroupChat",
     "Swarm",

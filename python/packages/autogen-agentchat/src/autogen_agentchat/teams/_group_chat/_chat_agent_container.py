@@ -68,6 +68,10 @@ class ChatAgentContainer(SequentialRoutedAgent):
         """Handle a reset event by resetting the agent."""
         self._message_buffer.clear()
         await self._agent.on_reset(ctx.cancellation_token)
+    
+    def pair_request_with_response(self, message: GroupChatRequestPublish, response: Response, agent_name: str) -> GroupChatAgentResponse:
+        """Pair a request with a response."""
+        return GroupChatAgentResponse(agent_response=response, agent_name=agent_name)
 
     @event
     async def handle_request(self, message: GroupChatRequestPublish, ctx: MessageContext) -> None:
@@ -94,7 +98,7 @@ class ChatAgentContainer(SequentialRoutedAgent):
                 # Publish the response to the group chat.
                 self._message_buffer.clear()
                 await self.publish_message(
-                    GroupChatAgentResponse(agent_response=response, agent_name=self._agent.name),
+                    self.pair_request_with_response(message, response, self._agent.name),
                     topic_id=DefaultTopicId(type=self._parent_topic_type),
                     cancellation_token=ctx.cancellation_token,
                 )

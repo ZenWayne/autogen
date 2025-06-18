@@ -158,6 +158,9 @@ class BaseGroupChatManager(SequentialRoutedAgent, ABC):
             await self._signal_termination_with_error(error)
             # Raise the exception to the runtime.
             raise
+    def fetch_group_chat_request_publish(self) -> GroupChatRequestPublish:
+        """Fetch the group chat request publish from the message."""
+        return GroupChatRequestPublish()
 
     async def _transition_to_next_speakers(self, cancellation_token: CancellationToken) -> None:
         speaker_names_future = asyncio.ensure_future(self.select_speaker(self._message_thread))
@@ -176,7 +179,7 @@ class BaseGroupChatManager(SequentialRoutedAgent, ABC):
         for speaker_name in speaker_names:
             speaker_topic_type = self._participant_name_to_topic_type[speaker_name]
             await self.publish_message(
-                GroupChatRequestPublish(),
+                self.fetch_group_chat_request_publish(),
                 topic_id=DefaultTopicId(type=speaker_topic_type),
                 cancellation_token=cancellation_token,
             )
