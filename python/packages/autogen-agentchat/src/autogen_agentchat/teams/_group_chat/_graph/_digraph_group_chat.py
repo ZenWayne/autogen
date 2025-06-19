@@ -274,7 +274,9 @@ class DiGraphSCC(DiGraph):
                     self._scc_adj[scc_u].append(scc_v)
                     self._scc_in_degree[scc_v] += 1
                     #compute edge
-                    self._scc_edges[scc_u][u].append(edge)
+                    if self._scc_edges[scc_u].get(u):
+                        self._scc_edges[scc_u]= {}
+                    self._scc_edges[scc_u][u] = [edge]
 
     def _compute_scc_edges(self) -> None:
         """Calculate edges within each SCC"""
@@ -591,7 +593,7 @@ class GraphFlowConfig(BaseModel):
     participants: List[ComponentModel]
     termination_condition: ComponentModel | None = None
     max_turns: int | None = None
-    graph: DiGraph  # The execution graph for agents
+    graph: DiGraphSCC  # The execution graph for agents
 
 
 class GraphFlow(BaseGroupChat, Component[GraphFlowConfig]):

@@ -24,11 +24,11 @@ from autogen_agentchat.teams._group_chat._events import (  # type: ignore[attr-d
 )
 from autogen_agentchat.teams._group_chat._graph._digraph_group_chat import (
     _DIGRAPH_STOP_AGENT_NAME,  # pyright: ignore[reportPrivateUsage]
-    DiGraph,
     DiGraphEdge,
     DiGraphNode,
     GraphFlowManager,
 )
+from autogen_agentchat.teams._group_chat._graph._digraph_group_chat import DiGraphSCC as DiGraph  # type: ignore[attr-defined]
 from autogen_core import AgentRuntime, CancellationToken, Component, SingleThreadedAgentRuntime
 from autogen_ext.models.replay import ReplayChatCompletionClient
 from pydantic import BaseModel
@@ -836,7 +836,81 @@ async def test_digraph_group_chat_loop_with_exit_condition_3(runtime: AgentRunti
 
 
 @pytest.mark.asyncio
-async def test_digraph_group_chat_loop_with_exit_condition_2(runtime: AgentRuntime | None) -> None:
+async def test_digraph_group_chat_2_scc_with_exit_condition(runtime: AgentRuntime | None) -> None:
+    # Agents A and C: Echo Agents
+    agent_a = _EchoAgent("A", description="Echo agent A")
+    agent_e = _EchoAgent("E", description="Echo agent E")
+
+    # Replay model client for agent B
+    model_client = ReplayChatCompletionClient(
+        chat_completions=[
+            "b_loop",  # First time O will branch to B
+            "O", # B will go back to O
+            "c_loop",  # Second time O will branch to C
+            "O", # C will go back to O
+            "exit",  # Third time O will say exit
+        ]
+    )
+    # Agent o, b, c: Assistant Agent using Replay Client
+    agent_o = AssistantAgent("O", description="Decision agent o", model_client=model_client)
+    agent_b = AssistantAgent("B", description="Decision agent b", model_client=model_client)
+    agent_c = AssistantAgent("C", description="Decision agent c", model_client=model_client)
+
+    # DiGraph: A ->O  O <-> B (bidirectional) O <-> C (bidirectional)
+    #
+    #        A
+    #       ||
+    #  C  = O  = B (bidirectional)
+    #       |
+    #       v
+    #       E(exit)
+    graph = DiGraph(
+        nodes={
+            "A": DiGraphNode(name="A", edges=[DiGraphEdge(target="O")]),
+            "O": DiGraphNode(name="O", edges=[
+                DiGraphEdge(target="B", condition="b_loop"), 
+                DiGraphEdge(target="C", condition="c_loop"),
+                DiGraphEdge(target="E", condition="exit")
+                ]),
+            "B": DiGraphNode(name="B", edges=[DiGraphEdge(target="O")]),
+            "C": DiGraphNode(name="C", edges=[DiGraphEdge(target="O")]),
+        },
+        default_start_node="A",
+    )
+
+    team = GraphFlow(
+        participants=[agent_a, agent_o, agent_b, agent_c, agent_e],
+        graph=graph,
+        runtime=runtime,
+        termination_condition=MaxMessageTermination(20),
+    )
+
+    # Run
+    result = await team.run(task="Start")
+
+    # Assert message order
+    expected_sources = [
+        "user",
+        "A",
+        "O", # 
+        "B", # O -> B
+        "O", # B -> O
+        "C", # O -> C
+        "O", # C -> O
+        "E", # O -> E
+        _DIGRAPH_STOP_AGENT_NAME,
+    ]
+
+    actual_sources = [m.source for m in result.messages]
+
+    assert actual_sources == expected_sources
+    assert result.stop_reason is not None
+    assert result.messages[-2].source == "O"
+    assert any(m.content == "exit" for m in result.messages[:-1])  # type: ignore[attr-defined,union-attr]
+    assert result.messages[-1].source == _DIGRAPH_STOP_AGENT_NAME
+
+@pytest.mark.asyncio
+async def test_digraph_group_chat_with_self_loop_with_exit_condition(runtime: AgentRuntime | None) -> None:
     # Agents A and C: Echo Agents
     agent_a = _EchoAgent("A", description="Echo agent A")
     agent_c = _EchoAgent("C", description="Echo agent C")
@@ -889,7 +963,7 @@ async def test_digraph_group_chat_loop_with_exit_condition_2(runtime: AgentRunti
 
     assert actual_sources == expected_sources
     assert result.stop_reason is not None
-    assert result.messages[-2].source == "C"
+    assert result.messages[-2].source == "O"
     assert any(m.content == "exit" for m in result.messages[:-1])  # type: ignore[attr-defined,union-attr]
     assert result.messages[-1].source == _DIGRAPH_STOP_AGENT_NAME
 

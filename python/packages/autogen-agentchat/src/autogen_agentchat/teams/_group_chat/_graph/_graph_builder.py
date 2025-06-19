@@ -4,7 +4,7 @@ from typing import Callable, Dict, Literal, Optional, Union
 from autogen_agentchat.base import ChatAgent
 from autogen_agentchat.messages import BaseChatMessage
 
-from ._digraph_group_chat import DiGraph, DiGraphEdge, DiGraphNode
+from ._digraph_group_chat import DiGraphSCC, DiGraphEdge, DiGraphNode
 
 
 class DiGraphBuilder:
@@ -166,9 +166,9 @@ class DiGraphBuilder:
         self._default_start_node = node_name
         return self
 
-    def build(self) -> DiGraph:
+    def build(self) -> DiGraphSCC:
         """Build and validate the DiGraph."""
-        graph = DiGraph(
+        graph = DiGraphSCC(
             nodes=self.nodes,
             default_start_node=self._default_start_node,
         )
