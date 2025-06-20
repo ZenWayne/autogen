@@ -874,6 +874,7 @@ async def test_digraph_group_chat_2_scc_with_exit_condition(runtime: AgentRuntim
                 ]),
             "B": DiGraphNode(name="B", edges=[DiGraphEdge(target="O")]),
             "C": DiGraphNode(name="C", edges=[DiGraphEdge(target="O")]),
+            "E": DiGraphNode(name="E", edges=[]),
         },
         default_start_node="A",
     )

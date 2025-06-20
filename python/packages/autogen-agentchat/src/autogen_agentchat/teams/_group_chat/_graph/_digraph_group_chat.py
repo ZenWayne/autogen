@@ -234,10 +234,10 @@ class DiGraphSCC(DiGraph):
         self._scc_counter = 0
         self._scc_nodes = {}  # scc_id -> nodes
         self._scc_adj = {}    # scc_id -> [neighbor_scc_ids]
-        self._scc_edges = {}  # scc_id -> [source_node -> list[edges]]
+        self._scc_edges :Dict[str, Dict[str, List[DiGraphEdge]]] = {}  # scc_id -> [source_node -> list[edges]]
         self._scc_in_degree = {}  # scc_id -> in_degree
-        self._scc_nodes_in_degree = {}  # scc_id -> [node -> in_degree]
-        self._scc_nodes_activation = {}  # scc_id -> [node -> activation]
+        self._scc_nodes_in_degree :Dict[str, Dict[str, int]] = {}  # scc_id -> [node -> in_degree]
+        self._scc_nodes_activation :Dict[str, Dict[str, Literal["any", "all"]]] = {}  # scc_id -> [node -> activation]
         
         # Initialize SCC data
         for scc in self._sccs:
@@ -247,7 +247,7 @@ class DiGraphSCC(DiGraph):
             self._scc_adj[scc_id] = []
             self._scc_edges[scc_id] = {}
             self._scc_in_degree[scc_id] = 0
-            self._scc_nodes_in_degree[scc_id] = {}
+            self._scc_nodes_in_degree[scc_id] = {node: 0 for node in scc}
             self._scc_nodes_activation[scc_id] = {}
         # Calculate dependencies between SCCs
         self._compute_scc_dependencies()
@@ -274,9 +274,9 @@ class DiGraphSCC(DiGraph):
                     self._scc_adj[scc_u].append(scc_v)
                     self._scc_in_degree[scc_v] += 1
                     #compute edge
-                    if self._scc_edges[scc_u].get(u):
-                        self._scc_edges[scc_u]= {}
-                    self._scc_edges[scc_u][u] = [edge]
+                if u not in self._scc_edges[scc_u]:
+                    self._scc_edges[scc_u][u] = []
+                self._scc_edges[scc_u][u].append(edge)
 
     def _compute_scc_edges(self) -> None:
         """Calculate edges within each SCC"""
@@ -294,11 +294,11 @@ class DiGraphSCC(DiGraph):
                     self._scc_nodes_activation[scc_id][edge.target] = "all"
                 self._scc_edges[scc_id][u] = internal_edges
 
-    def get_scc_nodes_in_degree(self, scc_id: str) -> Dict[str, int]:
-        return self._scc_nodes_in_degree[scc_id]
+    def get_scc_nodes_in_degree(self) -> Dict[str, Dict[str, int]]:
+        return self._scc_nodes_in_degree
 
-    def get_scc_nodes_activation(self, scc_id: str, node: str) -> Literal["any", "all"]:
-        return self._scc_nodes_activation[scc_id][node]
+    def get_scc_nodes_activation(self) -> Dict[str, Dict[str, Literal["any", "all"]]]:
+        return self._scc_nodes_activation
 
     def _tarjan_dfs(self, u: str, tarjan_data: _TarjanDataStruct) -> None:
         """DFS implementation of Tarjan's algorithm"""
@@ -366,7 +366,16 @@ class DiGraphSCC(DiGraph):
             List of nodes contained in the SCC
         """
         return self._scc_nodes[scc_id]
-    
+    def get_leaf_nodes(self) -> List[str]:
+        """Get the list of leaf nodes in the graph"""
+        start_scc = [scc_id for scc_id, degree in self._scc_in_degree.items() if degree == 0]
+        leaf_nodes = []
+        for scc_id in start_scc:
+            for node in self._scc_nodes[scc_id]:
+                if self._scc_nodes_in_degree[scc_id][node] == 0:
+                    leaf_nodes.append(node)
+        return leaf_nodes
+
     def get_activation(self, node_name: str) -> Literal["any", "all"]:
         """Get the activation method of the SCC"""
         return self.nodes[node_name].activation
@@ -378,12 +387,18 @@ class DiGraphSCC(DiGraph):
     def get_start_nodes(self) -> List[str]:
         """Get nodes with in-degree 0 as starting points"""
         starts_nodes = []
-        for nodes_in_degree in self._scc_nodes_in_degree.values():
-            for node, in_degree in nodes_in_degree.items():
-                if in_degree == 0:
-                    starts_nodes.append(node)
+        self.default_start_scc = self.get_scc_by_node(self.default_start_node)
+        start_scc = [scc_id for scc_id, degree in self._scc_in_degree.items() if degree == 0]
+        for scc_id in start_scc:
+            for nodes_in_degree in self._scc_nodes_in_degree[scc_id]:
+                for node, in_degree in nodes_in_degree.items():
+                    if in_degree == 0:
+                        starts_nodes.append(node)
+                        #set the default start scc to the first start node found
+                        if not self.default_start_scc :
+                            self.default_start_scc = scc_id
         if not starts_nodes:
-            return [self.default_start_scc] if self.default_start_scc else []
+            return [self.default_start_node] if self.default_start_node else []
         else:
             return starts_nodes
 
@@ -404,6 +419,29 @@ class DiGraphSCC(DiGraph):
                     queue.append(neighbor_scc)
                     
         return scc_exec_order
+
+    def graph_validate(self) -> None:
+        """Validate graph structure and execution rules."""
+        if not self.nodes:
+            raise ValueError("Graph has no nodes.")
+
+        if not self.get_start_nodes():
+            raise ValueError("Graph must have at least one start node")
+
+        if not self.get_leaf_nodes():
+            raise ValueError("Graph must have at least one leaf node")
+
+        # Outgoing edge condition validation (per node)
+        for node in self.nodes.values():
+            # Check that if a node has an outgoing conditional edge, then all outgoing edges are conditional
+            has_condition = any(
+                edge.condition is not None or edge.condition_function is not None for edge in node.edges
+            )
+            has_unconditioned = any(edge.condition is None and edge.condition_function is None for edge in node.edges)
+            if has_condition and has_unconditioned:
+                raise ValueError(f"Node '{node.name}' has a mix of conditional and unconditional edges.")
+
+        self._has_cycles = self.has_cycles_with_exit()
 
 class GraphFlowManagerState(BaseGroupChatManagerState):
     """Tracks active execution state for DAG-based execution."""
@@ -448,31 +486,21 @@ class GraphFlowManager(BaseGroupChatManager):
         self._graph = graph
         # Lookup table for incoming edges for each node.
         #self._parents = graph.get_parents()
-        
-        self._scc_parent : Dict[str, List[str]] = graph.get_scc_parent()
+
         self._current_scc : List[str]  = []
         # Lookup table for outgoing edges for each node.
         #self._edges: Dict[str, List[DiGraphEdge]] = {n: node.edges for n, node in graph.nodes.items()}
         # Activation lookup table for each node.
         scc_ids : List[str] = graph.get_scc_adj().keys()
-        self._activation: Dict[str, Dict[str, Literal["any", "all"]]] = {
-            scc_id: {
-                node: graph.get_scc_nodes_activation(scc_id, node) for node in graph.get_scc_nodes_in_degree(scc_id).keys()
-            } for scc_id in scc_ids
-        }
+        self._activation: Dict[str, Dict[str, Literal["any", "all"]]] = graph.get_scc_nodes_activation()
 
         # === Mutable states for the graph execution ===
         # Count the number of remaining parents to activate each node.
-        self._remaining: Dict[str,Dict[str,Counter[str]]] = {
-            scc_id: {
-                node: self._graph.get_scc_nodes_in_degree(scc_id)[node] for node in graph.get_scc_nodes(scc_id)
-            } 
-            for scc_id in scc_ids
-        }
+        self._remaining: Dict[str,Dict[str,Counter[str]]] = graph.get_scc_nodes_in_degree()
         # Lookup table for nodes that have been enqueued through an any activation.
         # This is used to prevent re-adding the same node multiple times.
         self._enqueued_any: Dict[str, Dict[str, bool]] = {
-            scc_id: {node: False for node in graph.get_scc_nodes_in_degree(scc_id).keys()} for scc_id in scc_ids
+            scc_id: {node: False for node in graph.get_scc_nodes_in_degree()[scc_id]} for scc_id in scc_ids
         }
         # Ready queue for nodes that are ready to execute, starting with the start nodes.
         self._ready: Deque[str] = deque(graph.get_start_nodes())
@@ -498,6 +526,7 @@ class GraphFlowManager(BaseGroupChatManager):
         assert isinstance(message, BaseChatMessage)
         source_scc_id :str = message.metadata["scc"]
         source_node = message.source
+        self._current_scc = source_scc_id
 
         # Propagate the update to the children of the node.
         for edge in self._graph.get_scc_edges(source_scc_id, source_node):
