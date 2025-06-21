@@ -1,5 +1,5 @@
 import traceback
-from typing import List
+from typing import List, Tuple
 
 from pydantic import BaseModel
 
@@ -63,10 +63,16 @@ class GraphFlowGroupChatAgentResponse(GroupChatAgentResponse):
     ...
 
 
-class GraphFlowGroupChatRequestPublish(BaseModel):
+class GraphFlowGroupChatRequestPublish(GroupChatRequestPublish):
     """A request to publish a message to a graph flow group chat."""
 
-    scc: List[str]
+    scc_id: str
+    """The SCC ID."""
+
+    # current_scc_id: str
+    # """The current SCC ID."""
+    # previous_scc_id: str
+    # """The previous SCC ID."""
 
 
 class GroupChatMessage(BaseModel):

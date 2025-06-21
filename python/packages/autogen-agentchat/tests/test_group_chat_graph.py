@@ -838,7 +838,8 @@ async def test_digraph_group_chat_loop_with_exit_condition_3(runtime: AgentRunti
 @pytest.mark.asyncio
 async def test_digraph_group_chat_2_scc_with_exit_condition(runtime: AgentRuntime | None) -> None:
     # Agents A and C: Echo Agents
-    agent_a = _EchoAgent("A", description="Echo agent A")
+    agent_a1 = _EchoAgent("A1", description="Echo agent A1")
+    agent_a2 = _EchoAgent("A2", description="Echo agent A2")
     agent_e = _EchoAgent("E", description="Echo agent E")
 
     # Replay model client for agent B
@@ -858,29 +859,29 @@ async def test_digraph_group_chat_2_scc_with_exit_condition(runtime: AgentRuntim
 
     # DiGraph: A ->O  O <-> B (bidirectional) O <-> C (bidirectional)
     #
-    #        A
-    #       ||
+    #       A1 A2
+    #       | /
     #  C  = O  = B (bidirectional)
     #       |
-    #       v
     #       E(exit)
     graph = DiGraph(
         nodes={
-            "A": DiGraphNode(name="A", edges=[DiGraphEdge(target="O")]),
+            "A1": DiGraphNode(name="A1", edges=[DiGraphEdge(target="O")]),
+            "A2": DiGraphNode(name="A2", edges=[DiGraphEdge(target="O")]),
             "O": DiGraphNode(name="O", edges=[
                 DiGraphEdge(target="B", condition="b_loop"), 
                 DiGraphEdge(target="C", condition="c_loop"),
                 DiGraphEdge(target="E", condition="exit")
-                ]),
+                ],
+                activation="any"),
             "B": DiGraphNode(name="B", edges=[DiGraphEdge(target="O")]),
             "C": DiGraphNode(name="C", edges=[DiGraphEdge(target="O")]),
             "E": DiGraphNode(name="E", edges=[]),
-        },
-        default_start_node="A",
+        }
     )
 
     team = GraphFlow(
-        participants=[agent_a, agent_o, agent_b, agent_c, agent_e],
+        participants=[agent_a1, agent_a2, agent_o, agent_b, agent_c, agent_e],
         graph=graph,
         runtime=runtime,
         termination_condition=MaxMessageTermination(20),
@@ -892,7 +893,8 @@ async def test_digraph_group_chat_2_scc_with_exit_condition(runtime: AgentRuntim
     # Assert message order
     expected_sources = [
         "user",
-        "A",
+        "A1",
+        "A2",
         "O", # 
         "B", # O -> B
         "O", # B -> O

@@ -1,6 +1,6 @@
 import asyncio
 from collections import Counter, deque
-from typing import Any, Callable, Deque, Dict, List, Literal, Mapping, Sequence, Set, Union
+from typing import Any, Callable, Deque, Dict, List, Literal, Mapping, Sequence, Set, Tuple, Union
 
 from autogen_core import AgentRuntime, CancellationToken, Component, ComponentModel
 from pydantic import BaseModel, Field, model_validator
@@ -19,9 +19,12 @@ from autogen_agentchat.messages import (
 )
 from autogen_agentchat.state import BaseGroupChatManagerState
 from autogen_agentchat.teams import BaseGroupChat, GraphFlowGroupChatRequestPublish, GraphFlowGroupChatAgentResponse
-
+from autogen_agentchat.teams._group_chat._chat_agent_container import ChatAgentContainer
 from ..._group_chat._base_group_chat_manager import BaseGroupChatManager
 from ..._group_chat._events import GroupChatTermination
+from autogen_core import MessageContext, event
+
+
 
 _DIGRAPH_STOP_AGENT_NAME = "DiGraphStopAgent"
 _DIGRAPH_STOP_AGENT_MESSAGE = "Digraph execution is complete"
@@ -78,6 +81,9 @@ class DiGraphEdge(BaseModel):
             return self.condition in message.to_model_text()
         return True  # None condition is always satisfied
 
+class DiGraphEdgeSCC(DiGraphEdge):
+
+    activation_group : Literal["any", "all"] = "all"
 
 class DiGraphNode(BaseModel):
     """Represents a node (agent) in a :class:`DiGraph`, with its outgoing edges and activation type.
@@ -89,7 +95,7 @@ class DiGraphNode(BaseModel):
     """
 
     name: str  # Agent's name
-    edges: List[DiGraphEdge] = []  # Outgoing edges
+    edges: List[DiGraphEdgeSCC] = []  # Outgoing edges
     activation: Literal["all", "any"] = "all"
 
 
@@ -214,7 +220,7 @@ class DiGraphSCC(DiGraph):
     Uses Tarjan's algorithm to find all strongly connected components and assigns unique identifiers to each SCC.
     Supports dependency management between SCCs and execution order calculation.
     """
-    default_start_scc: List[str] | None = None
+    default_start_sccs: List[str] | None = None
     
     class _TarjanDataStruct:
         """Data structure used by Tarjan's algorithm"""
@@ -281,18 +287,15 @@ class DiGraphSCC(DiGraph):
     def _compute_scc_edges(self) -> None:
         """Calculate edges within each SCC"""
         for scc_id, nodes in self._scc_nodes.items():
-            scc_nodes = set(nodes)
-            internal_edges = []
-            
+            #all out edges of scc
             for u in nodes:
+                self._scc_nodes_activation[scc_id][u] = self.nodes[u].activation
                 for edge in self.nodes[u].edges:
-                    if edge.target in scc_nodes:
-                        internal_edges.append(edge)
                     if edge.target not in self._scc_nodes_in_degree[scc_id]:
                         self._scc_nodes_in_degree[scc_id][edge.target] = 0
                     self._scc_nodes_in_degree[scc_id][edge.target] += 1
                     self._scc_nodes_activation[scc_id][edge.target] = "all"
-                self._scc_edges[scc_id][u] = internal_edges
+                self._scc_edges[scc_id][u] = self.nodes[u].edges
 
     def get_scc_nodes_in_degree(self) -> Dict[str, Dict[str, int]]:
         return self._scc_nodes_in_degree
@@ -384,21 +387,22 @@ class DiGraphSCC(DiGraph):
         """Get adjacency relationships between SCCs"""
         return self._scc_adj
 
-    def get_start_nodes(self) -> List[str]:
+    def get_start_sccs(self) -> List[Tuple[str,str]]:
+        """Get the start SCC"""
+        return self.default_start_sccs
+
+    def get_start_nodes(self) -> List[Tuple[str,str]]:
         """Get nodes with in-degree 0 as starting points"""
         starts_nodes = []
-        self.default_start_scc = self.get_scc_by_node(self.default_start_node)
-        start_scc = [scc_id for scc_id, degree in self._scc_in_degree.items() if degree == 0]
+        #reverse the start scc to get the first start node found
+        start_scc = reversed([scc_id for scc_id, degree in self._scc_in_degree.items() if degree == 0])
+        self.default_start_sccs = start_scc
         for scc_id in start_scc:
-            for nodes_in_degree in self._scc_nodes_in_degree[scc_id]:
-                for node, in_degree in nodes_in_degree.items():
-                    if in_degree == 0:
-                        starts_nodes.append(node)
-                        #set the default start scc to the first start node found
-                        if not self.default_start_scc :
-                            self.default_start_scc = scc_id
+            for node, in_degree in self._scc_nodes_in_degree[scc_id].items():
+                if in_degree == 0:
+                    starts_nodes.append((node,scc_id))
         if not starts_nodes:
-            return [self.default_start_node] if self.default_start_node else []
+            raise ValueError("No start nodes found")
         else:
             return starts_nodes
 
@@ -443,13 +447,55 @@ class DiGraphSCC(DiGraph):
 
         self._has_cycles = self.has_cycles_with_exit()
 
+class GraphFlowChatAgentContainer(ChatAgentContainer):
+    """A container for a graph flow agent chat."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.scc_tuple : Tuple[str,str] | None = None
+
+    @event
+    async def handle_request(self, message: GraphFlowGroupChatRequestPublish, ctx: MessageContext) -> None:
+        """Handle a request event by passing the messages in the buffer
+        to the delegate agent and publish the response."""
+        await super().handle_request(message, ctx)
+    
+    @event
+    async def handle_agent_response(self, message: GraphFlowGroupChatRequestPublish, ctx: MessageContext) -> None:
+        """Handle a request event by passing the messages in the buffer
+        to the delegate agent and publish the response."""
+        await super().handle_agent_response(message, ctx)
+        
+        
+
 class GraphFlowManagerState(BaseGroupChatManagerState):
     """Tracks active execution state for DAG-based execution."""
 
     active_nodes: List[str] = []  # Currently executing nodes
     type: str = "GraphManagerState"
 
+class GraphFlowAgentChatContainer(ChatAgentContainer):
+    """A container for a graph flow agent chat."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.scc_tuple : Tuple[str,str] | None = None
+    
+    @event
+    async def handle_request(self, message: GraphFlowGroupChatRequestPublish, ctx: MessageContext) -> None:
+        """Handle a request event by passing the messages in the buffer
+        to the delegate agent and publish the response."""
+        await super().handle_request(message, ctx)
+    
+    @event
+    async def handle_agent_response(self, message: GraphFlowGroupChatAgentResponse, ctx: MessageContext) -> None:
+        """Handle a request event by passing the messages in the buffer
+        to the delegate agent and publish the response."""
+        await super().handle_agent_response(message, ctx)
 
+    def pair_request_with_response(self, message: GraphFlowGroupChatRequestPublish, response: Response, agent_name: str) -> GraphFlowGroupChatAgentResponse:
+        """Pair a request with a response."""
+        response : GraphFlowGroupChatAgentResponse = GraphFlowGroupChatAgentResponse(agent_response=response, agent_name=agent_name)
+        response.agent_response.chat_message.metadata["scc_id"] = message.scc_id
+        return response
 class GraphFlowManager(BaseGroupChatManager):
     """Manages execution of agents using a Directed Graph execution model."""
 
@@ -480,6 +526,7 @@ class GraphFlowManager(BaseGroupChatManager):
             max_turns=max_turns,
             message_factory=message_factory,
         )
+        self._sequential_message_types.extend([GraphFlowGroupChatRequestPublish, GraphFlowGroupChatAgentResponse])
         graph.graph_validate()
         if graph.get_has_cycles() and self._termination_condition is None and self._max_turns is None:
             raise ValueError("A termination condition is required for cyclic graphs without a maximum turn limit.")
@@ -487,7 +534,7 @@ class GraphFlowManager(BaseGroupChatManager):
         # Lookup table for incoming edges for each node.
         #self._parents = graph.get_parents()
 
-        self._current_scc : List[str]  = []
+        self._current_scc : str  = ()
         # Lookup table for outgoing edges for each node.
         #self._edges: Dict[str, List[DiGraphEdge]] = {n: node.edges for n, node in graph.nodes.items()}
         # Activation lookup table for each node.
@@ -496,71 +543,83 @@ class GraphFlowManager(BaseGroupChatManager):
 
         # === Mutable states for the graph execution ===
         # Count the number of remaining parents to activate each node.
-        self._remaining: Dict[str,Dict[str,Counter[str]]] = graph.get_scc_nodes_in_degree()
+        self._remaining: Dict[str,Counter[str]] = {
+            scc_id: Counter({node: in_degree for node, in_degree in scc_nodes_in_degree.items()}) 
+            for scc_id, scc_nodes_in_degree in graph.get_scc_nodes_in_degree().items()
+        }
+        
         # Lookup table for nodes that have been enqueued through an any activation.
         # This is used to prevent re-adding the same node multiple times.
         self._enqueued_any: Dict[str, Dict[str, bool]] = {
             scc_id: {node: False for node in graph.get_scc_nodes_in_degree()[scc_id]} for scc_id in scc_ids
         }
+        
         # Ready queue for nodes that are ready to execute, starting with the start nodes.
-        self._ready: Deque[str] = deque(graph.get_start_nodes())
+        # node name and scc id
+        start_sccs = graph.get_start_nodes()
+        self._current_scc = start_sccs[0][1]
+        self._ready: Deque[Tuple[str,str]] = deque(start_sccs)
 
-    def pair_request_with_response(self, message: GraphFlowGroupChatRequestPublish, response: Response, agent_name: str) -> GraphFlowGroupChatAgentResponse:
-        """Pair a request with a response."""
-        response : GraphFlowGroupChatAgentResponse = GraphFlowGroupChatAgentResponse(agent_response=response, agent_name=agent_name)
-        response.agent_response.chat_message.metadata["scc"] = self._current_scc
-        return response
-    
+    @event
+    async def handle_agent_response(self, message: GraphFlowGroupChatAgentResponse, ctx: MessageContext) -> None:
+        """Handle an agent response event by updating the message thread and propagating the update to the children of the node."""
+        await super().handle_agent_response(message, ctx)
+        
+
     def fetch_group_chat_request_publish(self) -> GraphFlowGroupChatRequestPublish:
         """Fetch the group chat request publish from the message."""
-        return GraphFlowGroupChatRequestPublish(scc=self._current_scc)
+        return GraphFlowGroupChatRequestPublish(scc_id=self._current_scc)
 
     async def update_message_thread(self, messages: Sequence[BaseAgentEvent | BaseChatMessage]) -> None:
         await super().update_message_thread(messages)
 
+        # Fetch the current scc from the message
         # Find the node that ran in the current turn.
         message = messages[-1]
         if message.source not in self._graph.nodes:
             # Ignore messages from sources outside of the graph.
             return
         assert isinstance(message, BaseChatMessage)
-        source_scc_id :str = message.metadata["scc"]
+        current_scc_id = message.metadata["scc_id"]
         source_node = message.source
-        self._current_scc = source_scc_id
+        self._current_scc = current_scc_id
 
         # Propagate the update to the children of the node.
-        for edge in self._graph.get_scc_edges(source_scc_id, source_node):
+        for edge in self._graph.get_scc_edges(current_scc_id, source_node):
             # Use the new check_condition method that handles both string and callable conditions
             if not edge.check_condition(message):
                 continue
             target_scc_id = self._graph.get_scc_by_node(edge.target)
-            if self._activation[edge.target] == "all":
-                self._remaining[target_scc_id][source_node][edge.target] -= 1
-                if self._remaining[target_scc_id][source_node][edge.target] == 0:
-                    # If all parents are done, add to the ready queue.
-                    self._ready.append(edge.target)
-                    self._current_scc = target_scc_id
+            if self._activation[current_scc_id][edge.target] == "all":
+                self._remaining[current_scc_id][edge.target] -= 1
+                if self._remaining[current_scc_id][edge.target] == 0:
+                    # If all parents are done, it means it's time to switch scc.
+                    self._ready.append((edge.target,target_scc_id))
             else:
                 # If activation is any, add to the ready queue if not already enqueued.
                 if not self._enqueued_any[target_scc_id][edge.target]:
-                    self._ready.append(edge.target)
+                    self._ready.append((edge.target,target_scc_id))
                     self._enqueued_any[target_scc_id][edge.target] = True
-                    self._current_scc = target_scc_id
             
 
     async def select_speaker(self, thread: Sequence[BaseAgentEvent | BaseChatMessage]) -> List[str]:
         # Drain the ready queue for the next set of speakers.
         #switch current_scc
         speakers: List[str] = []
+        # Find the node that ran in the current turn.
+        message = thread[-1]
         while self._ready:
-            speaker = self._ready.popleft()
+            speaker, target_scc_id = self._ready.popleft()
             speakers.append(speaker)
-            # Reset the bookkeeping for the node that were selected.
-            scc_id = self._current_scc
-            if self._activation[scc_id][speaker] == "any":
-                self._enqueued_any[scc_id][speaker] = False
+            source_scc_id = self._current_scc
+            if self._activation[source_scc_id][speaker] == "any":
+                self._enqueued_any[source_scc_id][speaker] = False
             else:
-                self._remaining[scc_id][speaker] = self._graph.get_scc_nodes_in_degree(scc_id)[speaker]
+                self._remaining[source_scc_id][speaker] = self._graph.get_scc_nodes_in_degree()[source_scc_id][speaker]
+                #trigger the target scc for the first turn
+                # if target_scc_id != source_scc_id:
+                #     self._remaining[target_scc_id][speaker] = 1
+            self._current_scc = target_scc_id
 
         # If there are no speakers, trigger the stop agent.
         if not speakers:
@@ -915,6 +974,19 @@ class GraphFlow(BaseGroupChat, Component[GraphFlowConfig]):
                 message_factory=message_factory,
                 graph=self._graph,
             )
+
+        return _factory
+
+    def _create_participant_factory(
+        self,
+        parent_topic_type: str,
+        output_topic_type: str,
+        agent: ChatAgent,
+        message_factory: MessageFactory,
+    ) -> Callable[[], GraphFlowAgentChatContainer]:
+        def _factory() -> GraphFlowAgentChatContainer:
+            container = GraphFlowAgentChatContainer(parent_topic_type, output_topic_type, agent, message_factory)
+            return container
 
         return _factory
 

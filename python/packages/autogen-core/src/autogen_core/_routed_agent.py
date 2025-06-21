@@ -259,7 +259,7 @@ def event(
 
         @wraps(func)
         async def wrapper(self: AgentT, message: ReceivesT, ctx: MessageContext) -> None:
-            if type(message) not in target_types:
+            if not any(isinstance(message, t) for t in target_types):
                 if strict:
                     raise CantHandleException(f"Message type {type(message)} not in target types {target_types}")
                 else:
